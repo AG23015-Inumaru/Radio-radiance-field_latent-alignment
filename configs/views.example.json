@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "camera_convention": "opengl",
+  "rf_from_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+  "views": [
+    {
+      "view_id": "rx000_view000",
+      "receiver_id": "rx000",
+      "image": "/REPLACE_WITH/GS/rendered/rx000_view000.png",
+      "camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+      "intrinsics": {"width": 1200, "height": 800, "fx": 600, "fy": 600, "cx": 600, "cy": 400}
+    }
+  ]
+}
