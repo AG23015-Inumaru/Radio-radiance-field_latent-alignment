@@ -1,4 +1,4 @@
-"""python -m rrf_alignment.extract --help"""
+"""python -m scripts.newrf_latent_alignment.extract --help"""
 import argparse
 from pathlib import Path
 

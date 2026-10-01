@@ -10,10 +10,10 @@ import numpy as np
 import torch
 import yaml
 
-from rrf_alignment.alignment import RFMapEncoder, pair_caches, split_views, training_statistics
-from rrf_alignment.cameras import camera_rays, load_views
-from rrf_alignment.newrf import FrozenNeWRF, _module
-from rrf_alignment.vae import GrayVectorVAE, VAEConfig, load_frozen_vae
+from scripts.newrf_latent_alignment.alignment import RFMapEncoder, pair_caches, split_views, training_statistics
+from scripts.newrf_latent_alignment.cameras import camera_rays, load_views
+from scripts.newrf_latent_alignment.newrf import FrozenNeWRF, _module
+from scripts.newrf_latent_alignment.vae import GrayVectorVAE, VAEConfig, load_frozen_vae
 
 torch.set_num_threads(1)
 
