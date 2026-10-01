@@ -3,6 +3,15 @@ numpy
 pandas
 matplotlib
 scikit-image
-torch
-torchvision
+
 tensorboard
+Pillow
+tqdm
+plyfile
+joblib
+scipy
+PyYAML
+omegaconf
+diffusers
+transformers
+accelerate

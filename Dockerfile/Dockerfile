@@ -1,6 +1,6 @@
-FROM ubuntu:latest
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
-ARG USER_NAME="ymaeda"
+ARG USER_NAME="sinumaru"
 ARG USER_ID="1000"
 ARG USER_GID="1000"
 ARG REQS_PATH="/XXX/requirements.txt"
