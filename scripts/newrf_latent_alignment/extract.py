@@ -1,4 +1,5 @@
 """python -m scripts.newrf_latent_alignment.extract --help"""
+#feature NeWRF extract
 import argparse
 from pathlib import Path
 
