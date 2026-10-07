@@ -8,7 +8,7 @@ ARG REQS_PATH="/XXX/requirements.txt"
 RUN ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
 RUN apt-get update && apt-get install -y \
     zsh vim wget sudo git libopencv-dev python3 python3-pip python3-tk x11-apps
-#RUN userdel ubuntu 
+#RUN userdel ubuntu
 RUN groupadd -g ${USER_GID} ${USER_NAME} &&\
     useradd -m -s /bin/zsh -u ${USER_ID} -g ${USER_GID} ${USER_NAME}
 RUN echo ${USER_NAME}:${USER_NAME} | chpasswd &&\
