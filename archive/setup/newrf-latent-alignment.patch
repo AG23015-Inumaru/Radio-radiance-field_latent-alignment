@@ -1,0 +1,1595 @@
+From dc1f84209bfda203f791fdcd5c11a4ec4b3c3d45 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Wed, 30 Sep 2026 11:27:06 -0600
+Subject: [PATCH] Prototype NeWRF camera feature maps aligned with frozen VAE
+ means
+
+---
+ .gitignore                     |   7 ++
+ Dockerfile/requirements.txt    |   2 +
+ README.md                      | 210 +++++++++++++++++++++++++++++++++
+ configs/vae.example.json       |   7 ++
+ configs/views.example.json     |  14 +++
+ requirements-alignment.txt     |   5 +
+ rrf_alignment/__init__.py      |   1 +
+ rrf_alignment/alignment.py     | 106 +++++++++++++++++
+ rrf_alignment/cameras.py       | 106 +++++++++++++++++
+ rrf_alignment/common.py        |  42 +++++++
+ rrf_alignment/decode.py        |  74 ++++++++++++
+ rrf_alignment/encode.py        |  43 +++++++
+ rrf_alignment/extract.py       |  87 ++++++++++++++
+ rrf_alignment/newrf.py         | 144 ++++++++++++++++++++++
+ rrf_alignment/predict.py       |  34 ++++++
+ rrf_alignment/prepare_views.py |  76 ++++++++++++
+ rrf_alignment/train.py         | 120 +++++++++++++++++++
+ rrf_alignment/vae.py           | 169 ++++++++++++++++++++++++++
+ tests/test_alignment.py        | 182 ++++++++++++++++++++++++++++
+ 19 files changed, 1429 insertions(+)
+ create mode 100644 README.md
+ create mode 100644 configs/vae.example.json
+ create mode 100644 configs/views.example.json
+ create mode 100644 requirements-alignment.txt
+ create mode 100644 rrf_alignment/__init__.py
+ create mode 100644 rrf_alignment/alignment.py
+ create mode 100644 rrf_alignment/cameras.py
+ create mode 100644 rrf_alignment/common.py
+ create mode 100644 rrf_alignment/decode.py
+ create mode 100644 rrf_alignment/encode.py
+ create mode 100644 rrf_alignment/extract.py
+ create mode 100644 rrf_alignment/newrf.py
+ create mode 100644 rrf_alignment/predict.py
+ create mode 100644 rrf_alignment/prepare_views.py
+ create mode 100644 rrf_alignment/train.py
+ create mode 100644 rrf_alignment/vae.py
+ create mode 100644 tests/test_alignment.py
+
+diff --git a/.gitignore b/.gitignore
+index e3745b4..e3b394a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -15,3 +15,10 @@ __pycache__/
+ 
+ # Jupyter temporary files
+ .ipynb_checkpoints/
++
++# Local alignment data and experiment outputs
++Temp/
++runs/
++data/
++configs/local/
++.venv/
+diff --git a/Dockerfile/requirements.txt b/Dockerfile/requirements.txt
+index e97be18..790cf1e 100644
+--- a/Dockerfile/requirements.txt
++++ b/Dockerfile/requirements.txt
+@@ -6,3 +6,5 @@ scikit-image
+ torch
+ torchvision
+ tensorboard
++Pillow
++PyYAML
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..5535f27
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,210 @@
++# NeWRF → visual VAE latent alignment
++
++RF-3DGSの受信機位置で学習できたNeWRFを使う、案②の試作です。
++カメラ視野内のRF特徴マップをCNNで読み、対応する可視画像のVAE潜在平均 μ を予測します。
++
++## 試作の構成
++
++1. 学習済みNeWRFを固定して、画像の画素配置に沿うレイを問い合わせる。
++2. 各サンプル点で `model.output` の入力を取得する。方向条件付き分岐の最終I/Q出力の直前の特徴で、標準構成では64次元。
++3. 学習時の合成器が返す重み `w` で `sum(w * h)` を計算し、`sum(w)` を追加する。標準設定は `[65, 32, 48]`。
++4. 同じ位置・姿勢・画角でレンダリングしたGS画像を、固定したVAEで符号化して μ を得る。
++5. RF特徴マップ → 小型CNN → 予測 μ を学習する。損失は元のVAE座標における平均二乗誤差 `MSE(pred_mu, target_mu)`。
++6. 固定VAEのデコーダで画像を復元する。
++
++学習対象はCNNだけです。NeWRFとVAEの重みは変えません。VAEのサンプリングした z は使いません。
++既存の `train_gray_vae2.py` / `train_projection_head2.py` と同じ `GrayVectorVAE` を使うため、
++この試作の復元画像はグレースケールです。潜在次元はチェックポイントの設定から読みます。
++
++## まず用意するもの
++
++| 入力 | 内容 |
++|---|---|
++| NeWRFソース | 成功した学習時の `models.py`, `encoders.py`, `samplers.py`, `synthesizers.py` |
++| NeWRFチェックポイントとYAML | RF-3DGS受信機位置で学習できたモデル、その学習設定 |
++| カメラと教師画像 | 同じ受信機位置・姿勢・画角のGS画像、カメラの外部・内部パラメータ |
++| 座標変換 | GSのワールド座標 → NeWRF座標の4×4変換 |
++| VAEチェックポイント | 既存の学習済みGrayVectorVAE。設定が保存されていなければ設定JSONも必要 |
++
++実験用チェックポイントや画像はこのリポジトリには含みません。
++各パスは、Pythonを動かす同じ環境・コンテナから読める必要があります。
++既存の `docker_run.sh` は本リポジトリだけを `/workspace` にマウントします。
++別リポジトリのNeWRFや外部データを使う場合、そのディレクトリもコンテナにマウントしてください。
++
++```bash
++python -m pip install -r requirements-alignment.txt
++```
++
++PyTorchは現在使用しているCUDA環境に合うものを利用してください。
++
++## 1. 画像とカメラの対応を作る
++
++`configs/views.example.json` は形式の例であり、実験の座標や画像パスではありません。
++`rf_from_world` の単位変換・回転・並進を含め、実データの値に置き換えてください。
++座標が一致していると確認できた場合にだけ単位行列を指定します。
++
++各視点には次が必要です。
++
++- `view_id`: 画像とRF特徴を結び付ける一意なID。
++- `receiver_id`: 同じ受信機位置の全視点で共通のID。
++- `image`: その視点のGS画像。相対パスはmanifestのある場所を基準に解決。
++- `camera_to_world`: カメラ座標 → GSワールド座標。world-to-camera行列ではない。
++- `intrinsics`: 画像サイズと `fx, fy, cx, cy`。
++- `split`: 任意。指定する場合は全視点に `train` / `val` / `test` を指定。
++
++`camera_convention` はOpenCV（右・下・前が+X,+Y,+Z）または
++OpenGL（右・上・後ろが+X,+Y,+Z）を明示します。
++内部パラメータは画像の左上境界を原点とし、最初の画素中心を `(0.5, 0.5)` とする形式です。
++整数座標を画素中心とする較正値を使う場合は、主点の座標原点を合わせてください。
++カメラの中心をNeWRFの受信機位置に一致させます。
++
++Blender/NeRF形式の `transforms_train.json` がある場合は変換できます。
++`rf_from_world.json` の内容は4×4行列のJSON配列です。
++
++```bash
++python -m rrf_alignment.prepare_views \
++  --transforms /path/to/transforms_train.json \
++  --rf-from-world /path/to/rf_from_world.json \
++  --image-map /path/to/gs_image_map.json \
++  --output /workspace/Temp/newrf_alignment/views.json
++```
++
++`--image-map` は元の `file_path` → 実際のGSレンダリング画像のパスを対応付けるJSONです。
++相対パスはこのJSONの場所が基準です。画像名やソート順だけでは対応を推定しません。
++
++```json
++{
++  "./train/rx000_view000": "/path/to/gs/renders/00000.png",
++  "./train/rx001_view000": "/path/to/gs/renders/00001.png"
++}
++```
++
++`--image-map` を省略した場合は `file_path` の元画像を使います。
++GSの出力画像に置き換える際は、そのレンダリングに使ったカメラとの対応を確認してください。
++変換対象はOpenGLのcamera-to-worldを持つBlender形式です。
++COLMAPや3DGSの `cameras.json` は別形式なので、そのまま渡せません。
++`camera_angle_x` だけがある場合は、GSの通常の正方画素を仮定して `fy = fx` とします。
++
++## 2. 最初は1視点だけRF特徴を抽出する
++
++以下の変数は例です。実在する成功モデルのパスを設定します。
++
++```bash
++NEWRF_ROOT=/path/to/NeWRF-ubuntu35
++NEWRF_CONFIG=/path/to/successful_run/config.yaml
++NEWRF_CKPT=/path/to/successful_run/ckpt.pt
++ALIGN_DATA=/workspace/Temp/newrf_alignment
++
++python -m rrf_alignment.extract \
++  --newrf-root "$NEWRF_ROOT" \
++  --config "$NEWRF_CONFIG" \
++  --checkpoint "$NEWRF_CKPT" \
++  --views "$ALIGN_DATA/views.json" \
++  --model coarse --width 48 --height 32 --carrier-ghz 2.4 \
++  --limit 1 --output "$ALIGN_DATA/rf_one_view.pt"
++```
++
++最初はcoarseを使います。fineを試す場合は `--model fine` に変更します。
++fineはcoarseの密度重みで階層サンプリングし、その位置でfineの中間特徴を取得します。
++近端・遠端・サンプル数・inverse-depthは指定YAMLの `sampling` から読みます。
++明示的に変える場合は `--near`, `--far`, `--samples`, `--fine-samples`, `--inverse-depth` を指定します。
++推論時はサンプリングの摂動を無効にします。
++
++確認する出力:
++
++- `rf_one_view.diagnostics.json`: 生の密度値、正値率、重み総和、特徴ノルム。
++- `rf_one_view_preview/mass.png`: 重み総和。表示範囲は常に0～1。
++- `rf_one_view_preview/feature_norm.png`: 集約特徴のノルム。表示範囲は同じ場所のJSONに記録。
++
++`mass_mean` と `pooled_feature_norm_mean` がゼロなら、ここで原因を確認します。
++学習失敗だけでなく、座標の不一致や、細いRF寄与領域を視野レイが外している可能性があります。
++非ゼロでも場の正しさを保証するものではありません。値だけでなく位置・姿勢・画角の対応を確認してください。
++
++## 3. 全視点の特徴と教師 μ を作る
++
++1視点で確認できたら、同じ設定で `--limit` を外します。
++各キャッシュは既存ファイルへの上書きを拒否します。
++
++```bash
++python -m rrf_alignment.extract \
++  --newrf-root "$NEWRF_ROOT" --config "$NEWRF_CONFIG" --checkpoint "$NEWRF_CKPT" \
++  --views "$ALIGN_DATA/views.json" --model coarse --width 48 --height 32 \
++  --carrier-ghz 2.4 --output "$ALIGN_DATA/rf_features.pt"
++
++VAE_CKPT=/path/to/gray_vae/best.pt
++python -m rrf_alignment.encode \
++  --views "$ALIGN_DATA/views.json" --vae-checkpoint "$VAE_CKPT" \
++  --output "$ALIGN_DATA/visual_mu.pt"
++```
++
++VAEチェックポイントに完全な `config` がない場合は、学習時の値を記した
++`--vae-config /path/to/vae_config.json` を追加します。形式は `configs/vae.example.json` にあります。
++モデルの形状は厳密に照合します。800×1200・潜在32次元という例を無条件に当てはめません。
++教師画像は既存VAEと同じグレースケール化・Lanczosリサイズ・0～1正規化を使います。
++カメラの画像サイズ、RF特徴マップ、VAE入力の縦横比は一致させます。
++
++## 4. CNNを学習し、復元を見る
++
++```bash
++python -m rrf_alignment.train \
++  --features "$ALIGN_DATA/rf_features.pt" --targets "$ALIGN_DATA/visual_mu.pt" \
++  --output-dir "$ALIGN_DATA/run001" --epochs 200 --batch-size 16 --seed 0
++
++python -m rrf_alignment.decode \
++  --predictions "$ALIGN_DATA/run001/predictions.pt" --vae-checkpoint "$VAE_CKPT" \
++  --split val --output-dir "$ALIGN_DATA/run001/val_images"
++```
++
++設定JSONが必要なVAEでは、decodeにも同じ `--vae-config` を渡します。
++比較画像は左から「GS教師画像のグレースケール」「教師 μ のVAE復元」「RF予測 μ のVAE復元」です。
++PSNRは表示用の数枚だけでなく、指定splitの全視点で計算します。
++
++- `best.pt`: 検証μ-MSEで選んだCNN、正規化統計、入力モデル・設定の識別情報。
++- `history.json`, `metrics.json`: 潜在MSEと、訓練データの平均μを予測するベースライン。
++- `splits.json`: 実際の分割。既定は受信機グループ単位でtrain/val/test ≈ 70/20/10%。
++- `predictions.pt`: 各視点の予測μと教師μ。
++
++同じ受信機位置の別視点は同じsplitに置きます。別IDでも座標差が1e-5以下なら同一グループとして扱います。
++正規化統計はtrainだけで計算します。十分な数の受信機位置が必要です。
++空間領域を分けた評価は、manifestの `split` で指定してください。
++
++## 新しい視点で推論する
++
++同じNeWRF・特徴設定で新しいmanifestからRF特徴を抽出し、次を実行します。
++この経路では可視画像を読みません。manifestの `image` は対応情報として残して構いません。
++
++```bash
++python -m rrf_alignment.predict \
++  --checkpoint "$ALIGN_DATA/run001/best.pt" --features "$ALIGN_DATA/new_rf_features.pt" \
++  --output "$ALIGN_DATA/predicted_mu.pt"
++python -m rrf_alignment.decode \
++  --predictions "$ALIGN_DATA/predicted_mu.pt" --vae-checkpoint "$VAE_CKPT" \
++  --output-dir "$ALIGN_DATA/new_images"
++```
++
++## 解釈と制約
++
++`sum(w)` はNeWRFの密度由来の重みであり、受信電力ではありません。
++RFの密度分布は可視物体表面そのものを表すとは限りません。
++この特徴はカメラ視野に沿う場のサンプルを集約しますが、深さ方向の情報は集約によって失われます。
++場を使う利点の検証には、後で位置・姿勢だけのモデルや未学習NeWRFとの比較が必要です。
++
++今回の目的は、既に学習できたRF場から潜在整合が動くか確かめることです。
++CNNのtest位置がNeWRF学習やVAE学習に使われていれば、この分割だけで
++「RFも画像も未観測の地点への汎化」を示すことはできません。
++後の評価では、NeWRF・VAE・alignmentの学習に使った位置を別々に管理してください。
++
++ソースとチェックポイントのハッシュを保存して取り違えを検出しますが、
++そのソースが本当に学習時のものかはチェックポイント単体から検証できません。
++成功時の版のNeWRFを指定してください。ReLU/Softplusや合成器の境界処理は変更しません。
++現段階では実験用データを接続する前の試作であり、実環境のRF→画像性能は未検証です。
++
++## コードの動作確認
++
++```bash
++python -m unittest discover -s tests -v
++NEWRF_TEST_ROOT=/path/to/NeWRF python -m unittest discover -s tests -v
++```
++
++後者は実際の外部NeWRFコードと合成した重みを使い、coarse/fineの読み込み、
++特徴フック、レイ分割の整合性も確認します。実測データの学習精度を評価するテストではありません。
+diff --git a/configs/vae.example.json b/configs/vae.example.json
+new file mode 100644
+index 0000000..c7160a0
+--- /dev/null
++++ b/configs/vae.example.json
+@@ -0,0 +1,7 @@
++{
++  "image_height": 800,
++  "image_width": 1200,
++  "in_channels": 1,
++  "latent_dim": 32,
++  "channels": [32, 64, 128, 256, 256, 256]
++}
+diff --git a/configs/views.example.json b/configs/views.example.json
+new file mode 100644
+index 0000000..38f8e5f
+--- /dev/null
++++ b/configs/views.example.json
+@@ -0,0 +1,14 @@
++{
++  "schema_version": 1,
++  "camera_convention": "opengl",
++  "rf_from_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
++  "views": [
++    {
++      "view_id": "rx000_view000",
++      "receiver_id": "rx000",
++      "image": "/REPLACE_WITH/GS/rendered/rx000_view000.png",
++      "camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
++      "intrinsics": {"width": 1200, "height": 800, "fx": 600, "fy": 600, "cx": 600, "cy": 400}
++    }
++  ]
++}
+diff --git a/requirements-alignment.txt b/requirements-alignment.txt
+new file mode 100644
+index 0000000..b38ace3
+--- /dev/null
++++ b/requirements-alignment.txt
+@@ -0,0 +1,5 @@
++# Install a PyTorch build appropriate for your CUDA environment separately.
++torch>=2.1
++numpy>=1.24
++Pillow>=9.1
++PyYAML>=6.0
+diff --git a/rrf_alignment/__init__.py b/rrf_alignment/__init__.py
+new file mode 100644
+index 0000000..d4c57ae
+--- /dev/null
++++ b/rrf_alignment/__init__.py
+@@ -0,0 +1 @@
++"""Camera-conditioned NeWRF features aligned with a frozen visual VAE."""
+diff --git a/rrf_alignment/alignment.py b/rrf_alignment/alignment.py
+new file mode 100644
+index 0000000..71a5327
+--- /dev/null
++++ b/rrf_alignment/alignment.py
+@@ -0,0 +1,106 @@
++"""A small CNN and strict pairing/grouped splitting for the first experiment."""
++import random
++
++import numpy as np
++import torch
++from torch import nn
++
++from .common import finite_tensor
++
++
++class RFMapEncoder(nn.Module):
++    def __init__(self, in_channels, latent_dim):
++        super().__init__()
++        # Retain coarse image-plane position instead of global average pooling.
++        self.net = nn.Sequential(
++            nn.Conv2d(in_channels, 32, 3, padding=1), nn.GroupNorm(8, 32), nn.SiLU(),
++            nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.GroupNorm(8, 64), nn.SiLU(),
++            nn.Conv2d(64, 64, 3, stride=2, padding=1), nn.GroupNorm(8, 64), nn.SiLU(),
++            nn.AdaptiveAvgPool2d((4, 6)), nn.Flatten(),
++            nn.Linear(64 * 4 * 6, 128), nn.SiLU(), nn.Linear(128, latent_dim))
++
++    def forward(self, x):
++        return self.net(x)
++
++
++def pair_caches(features, targets):
++    if features.get("kind") != "rf_features" or targets.get("kind") != "visual_means":
++        raise ValueError("Expected RF feature and visual-mean caches")
++    if features.get("schema_version") != 1 or targets.get("schema_version") != 1:
++        raise ValueError("Unsupported cache schema")
++    x = finite_tensor(features["features"], "RF features").float()
++    y = finite_tensor(targets["mu"], "visual means").float()
++    fv, tv = features["views"], targets["views"]
++    if x.ndim != 4 or y.ndim != 2 or len(x) != len(fv) or len(y) != len(tv):
++        raise ValueError("Cache tensors must match their view metadata")
++    fids, tids = [v["view_id"] for v in fv], [v["view_id"] for v in tv]
++    if len(set(fids)) != len(fids) or len(set(tids)) != len(tids):
++        raise ValueError("Duplicate view IDs in a cache")
++    if set(fids) != set(tids):
++        raise ValueError("Feature and target view IDs differ; re-extract both for the same views")
++    lookup = {view_id: i for i, view_id in enumerate(tids)}
++    order = [lookup[view_id] for view_id in fids]
++    for f, ti in zip(fv, order):
++        target = tv[ti]
++        for key in ("receiver_id", "camera_signature", "image", "split"):
++            if f[key] != target[key]:
++                raise ValueError(f'{f["view_id"]}: incompatible {key} between the two caches')
++    if x.shape[1] < 2 or float(x[:, -1].max()) <= 1e-8:
++        raise ValueError("RF rendering mass is zero; diagnose the features before alignment training")
++    if (x[:, -1] < 0).any():
++        raise ValueError("The last feature channel must be nonnegative rendering mass")
++    return x, y[order], [tv[i] for i in order]
++
++
++def split_views(views, seed=0, val_fraction=0.2, test_fraction=0.1):
++    """All views at the same Rx center stay together, even with aliased Rx IDs."""
++    if not 0 < val_fraction < 1 or not 0 <= test_fraction < 1 or val_fraction + test_fraction >= 1:
++        raise ValueError("Invalid validation/test fractions")
++    parents = list(range(len(views)))
++
++    def root(i):
++        while parents[i] != i:
++            parents[i] = parents[parents[i]]
++            i = parents[i]
++        return i
++
++    for i, view in enumerate(views):
++        for j in range(i):
++            same_id = view["receiver_id"] == views[j]["receiver_id"]
++            same_position = np.allclose(view["rf_origin"], views[j]["rf_origin"], rtol=0, atol=1e-5)
++            if same_id or same_position:
++                parents[root(i)] = root(j)
++    groups = {}
++    for i in range(len(views)):
++        groups.setdefault(root(i), []).append(i)
++    explicit = [v.get("split") for v in views]
++    if any(explicit):
++        if not all(explicit):
++            raise ValueError("Specify split for every view or omit it for every view")
++        for indices in groups.values():
++            if len({explicit[i] for i in indices}) != 1:
++                raise ValueError("The same receiver position appears in multiple splits")
++        result = {name: [i for i, split in enumerate(explicit) if split == name]
++                  for name in ("train", "val", "test")}
++    else:
++        keys = sorted(groups)
++        random.Random(seed).shuffle(keys)
++        n_val = max(1, round(len(keys) * val_fraction))
++        n_test = max(1, round(len(keys) * test_fraction)) if test_fraction else 0
++        if len(keys) - n_val - n_test < 1:
++            raise ValueError("Too few receiver groups; use more views or --test-fraction 0")
++        assignments = {"val": keys[:n_val], "test": keys[n_val:n_val + n_test],
++                       "train": keys[n_val + n_test:]}
++        result = {name: [i for key in selected for i in groups[key]] for name, selected in assignments.items()}
++    if not result["train"] or not result["val"]:
++        raise ValueError("Both training and validation splits must be nonempty")
++    return result
++
++
++def training_statistics(x, y, train_indices):
++    # These statistics never see validation/test rows.
++    xt, yt = x[train_indices], y[train_indices]
++    return {"x_mean": xt.mean((0, 2, 3), keepdim=True),
++            "x_std": xt.std((0, 2, 3), correction=0, keepdim=True).clamp_min(1e-6),
++            "y_mean": yt.mean(0, keepdim=True),
++            "y_std": yt.std(0, correction=0, keepdim=True).clamp_min(1e-6)}
+diff --git a/rrf_alignment/cameras.py b/rrf_alignment/cameras.py
+new file mode 100644
+index 0000000..d12f170
+--- /dev/null
++++ b/rrf_alignment/cameras.py
+@@ -0,0 +1,106 @@
++"""Explicit camera/image correspondence; distances are in NeWRF coordinates."""
++import json
++import math
++from pathlib import Path
++
++import numpy as np
++
++from .common import fingerprint
++
++
++def _matrix(value, label, similarity=False):
++    matrix = np.asarray(value, dtype=np.float64)
++    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
++        raise ValueError(f"{label}: expected a finite 4x4 matrix")
++    if not np.allclose(matrix[3], [0, 0, 0, 1], atol=1e-6):
++        raise ValueError(f"{label}: last row must be [0, 0, 0, 1]")
++    linear = matrix[:3, :3]
++    gram = linear.T @ linear
++    scale2 = np.trace(gram) / 3 if similarity else 1.0
++    if scale2 <= 0 or not np.allclose(gram, scale2 * np.eye(3), atol=1e-5):
++        raise ValueError(f"{label}: expected {'a similarity transform' if similarity else 'a rigid pose'}")
++    if not similarity and np.linalg.det(linear) < 0:
++        raise ValueError(f"{label}: camera rotation must have determinant +1")
++    return matrix
++
++
++def load_views(path):
++    """All views require a stable ID, receiver group, pose, intrinsics and image."""
++    path = Path(path).expanduser().resolve()
++    document = json.loads(path.read_text())
++    if document.get("schema_version") != 1:
++        raise ValueError("views.json needs schema_version: 1")
++    convention = document.get("camera_convention")
++    if convention not in ("opencv", "opengl"):
++        raise ValueError("camera_convention must explicitly be opencv or opengl")
++    transform = _matrix(document["rf_from_world"], "rf_from_world", similarity=True)
++    views = document.get("views", [])
++    if not views:
++        raise ValueError("No views in manifest")
++    ids = set()
++    origins = {}
++    for view in views:
++        view_id, receiver = view.get("view_id"), view.get("receiver_id")
++        if not isinstance(view_id, str) or not view_id or view_id in ids:
++            raise ValueError("view_id must be a unique, nonempty string")
++        if not isinstance(receiver, str) or not receiver:
++            raise ValueError(f"{view_id}: receiver_id must be a nonempty string")
++        ids.add(view_id)
++        pose = _matrix(view["camera_to_world"], view_id)
++        origin = (transform @ pose)[:3, 3]
++        if receiver in origins and not np.allclose(origins[receiver], origin, rtol=0, atol=1e-5):
++            raise ValueError(f"{receiver}: multiple camera centers; check receiver IDs and poses")
++        origins[receiver] = origin
++        k = view["intrinsics"]
++        if any(not np.isfinite(k[key]) for key in ("width", "height", "fx", "fy", "cx", "cy")):
++            raise ValueError(f"{view_id}: nonfinite intrinsics")
++        if any(k[key] <= 0 for key in ("width", "height", "fx", "fy")):
++            raise ValueError(f"{view_id}: image size and focal length must be positive")
++        if any(int(k[key]) != k[key] for key in ("width", "height")):
++            raise ValueError(f"{view_id}: image width/height must be integers")
++        if not isinstance(view.get("image"), str) or not view["image"]:
++            raise ValueError(f"{view_id}: an explicit teacher image path is required")
++        if view.get("split") not in (None, "train", "val", "test"):
++            raise ValueError(f"{view_id}: invalid split")
++    # Hash the authored manifest before resolving paths; identity is not file order.
++    manifest_sha = fingerprint(document)
++    for view in views:
++        image_path = Path(view["image"]).expanduser()
++        view["image"] = str((path.parent / image_path).resolve())
++    return document, manifest_sha
++
++
++def camera_rays(view, document, width, height):
++    """Return unit RF-frame rays through the centers of the downsampled pixels.
++
++    Intrinsics use image-edge coordinates: the first full-resolution pixel center
++    is (0.5, 0.5). OpenCV cameras look along +Z; OpenGL cameras along -Z.
++    """
++    if width < 1 or height < 1:
++        raise ValueError("Feature-map size must be positive")
++    k = view["intrinsics"]
++    if not math.isclose(width / height, k["width"] / k["height"], rel_tol=1e-6):
++        raise ValueError("RF map and teacher image must have the same aspect ratio")
++    u = (np.arange(width) + 0.5) * k["width"] / width
++    v = (np.arange(height) + 0.5) * k["height"] / height
++    xx, yy = np.meshgrid((u - k["cx"]) / k["fx"], (v - k["cy"]) / k["fy"])
++    directions = np.stack((xx, yy, np.ones_like(xx)), -1).reshape(-1, 3)
++    if document["camera_convention"] == "opengl":
++        directions *= [1, -1, -1]
++    pose = np.asarray(view["camera_to_world"], dtype=np.float64)
++    transform = np.asarray(document["rf_from_world"], dtype=np.float64)
++    directions = directions @ (transform[:3, :3] @ pose[:3, :3]).T
++    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
++    origin = (transform @ pose)[:3, 3]
++    return np.broadcast_to(origin, directions.shape).copy().astype(np.float32), directions.astype(np.float32)
++
++
++def cache_views(document):
++    transform = np.asarray(document["rf_from_world"])
++    return [{"view_id": v["view_id"], "receiver_id": v["receiver_id"],
++             "image": v["image"], "split": v.get("split"),
++             "rf_origin": (transform @ np.asarray(v["camera_to_world"]))[:3, 3].tolist(),
++             "camera_signature": fingerprint({"convention": document["camera_convention"],
++                                                "rf_from_world": document["rf_from_world"],
++                                                "pose": v["camera_to_world"], "intrinsics": v["intrinsics"]}),
++             "intrinsics": v["intrinsics"]} for v in document["views"]]
+diff --git a/rrf_alignment/common.py b/rrf_alignment/common.py
+new file mode 100644
+index 0000000..cb08a6b
+--- /dev/null
++++ b/rrf_alignment/common.py
+@@ -0,0 +1,42 @@
++"""Small, explicit cache and checkpoint utilities."""
++import hashlib
++import json
++from pathlib import Path
++
++import torch
++
++
++def sha256_file(path):
++    digest = hashlib.sha256()
++    with Path(path).open("rb") as stream:
++        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def fingerprint(value):
++    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
++
++
++def load_tensor_file(path):
++    return torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
++
++
++def write_json(path, value):
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
++
++
++def save_new(path, value):
++    """Do not silently reuse or overwrite an earlier feature/target cache."""
++    path = Path(path).expanduser()
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("xb") as stream:
++        torch.save(value, stream)
++
++
++def finite_tensor(value, label):
++    if not torch.is_tensor(value) or not torch.isfinite(value).all():
++        raise ValueError(f"{label} must be a finite tensor")
++    return value
+diff --git a/rrf_alignment/decode.py b/rrf_alignment/decode.py
+new file mode 100644
+index 0000000..e279c61
+--- /dev/null
++++ b/rrf_alignment/decode.py
+@@ -0,0 +1,74 @@
++"""Decode held-out predictions and compare teacher, VAE reconstruction and RF reconstruction."""
++import argparse
++from pathlib import Path
++
++import numpy as np
++from PIL import Image
++import torch
++
++from .common import finite_tensor, load_tensor_file, sha256_file, write_json
++from .vae import load_frozen_vae, load_image
++
++
++def psnr(a, b):
++    mse = float((a - b).square().mean())
++    return float(-10 * np.log10(max(mse, 1e-12)))
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--predictions", required=True)
++    parser.add_argument("--vae-checkpoint", required=True)
++    parser.add_argument("--vae-config")
++    parser.add_argument("--output-dir", required=True)
++    parser.add_argument("--split", choices=["train", "val", "test"], default="val")
++    parser.add_argument("--max-images", type=int, default=8, help="Metrics use the entire selected split")
++    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
++    args = parser.parse_args()
++    cache = load_tensor_file(args.predictions)
++    if cache["vae_sha256"] != sha256_file(Path(args.vae_checkpoint).expanduser()):
++        raise ValueError("This is not the VAE checkpoint used to make the training targets")
++    inference = cache.get("kind") == "predicted_visual_means"
++    if not inference and args.split not in cache["splits"]:
++        raise ValueError(f"No {args.split} predictions in this run")
++    data = {"views": cache["views"], "pred_mu": cache["mu"]} if inference else cache["splits"][args.split]
++    vae = load_frozen_vae(args.vae_checkpoint, args.vae_config, args.device)
++    if vars(vae.config) != cache["vae_config"]:
++        raise ValueError("VAE configuration differs from the target cache")
++    out = Path(args.output_dir).expanduser()
++    out.mkdir(parents=True, exist_ok=False)
++    rows = []
++    with torch.no_grad():
++        for i, view in enumerate(data["views"]):
++            if inference:
++                predicted = finite_tensor(vae.decode(data["pred_mu"][i:i + 1].to(args.device))[0].cpu(), "RF image")
++                name = f"{i:05d}.png"
++                Image.fromarray((predicted[0].clamp(0, 1).numpy() * 255).round().astype(np.uint8)).save(out / name)
++                rows.append({"view_id": view["view_id"], "image": name})
++                continue
++            if sha256_file(view["image"]) != view["image_sha256"]:
++                raise ValueError(f'Teacher image changed since encoding: {view["image"]}')
++            teacher = load_image(view, vae.config)
++            oracle = finite_tensor(vae.decode(data["target_mu"][i:i + 1].to(args.device))[0].cpu(), "VAE image")
++            predicted = finite_tensor(vae.decode(data["pred_mu"][i:i + 1].to(args.device))[0].cpu(), "RF image")
++            row = {"view_id": view["view_id"], "vae_mu_psnr": psnr(oracle, teacher),
++                   "rf_mu_psnr": psnr(predicted, teacher)}
++            if i < args.max_images:
++                # Left: teacher grayscale, middle: decode(teacher mu), right: decode(RF mu).
++                panel = torch.cat((teacher, oracle, predicted), dim=-1)[0].clamp(0, 1).numpy()
++                row["panel"] = f"{i:05d}.png"
++                Image.fromarray((panel * 255).round().astype(np.uint8)).save(out / row["panel"])
++            rows.append(row)
++    if inference:
++        write_json(out / "images.json", {"views": rows})
++        print(f"Decoded {len(rows)} RF-only predictions to {out}")
++        return
++    write_json(out / "metrics.json", {"split": args.split, "views": rows,
++               "mean_vae_mu_psnr": float(np.mean([r["vae_mu_psnr"] for r in rows])),
++               "mean_rf_mu_psnr": float(np.mean([r["rf_mu_psnr"] for r in rows])),
++               "panel_order": ["teacher_grayscale", "decode_teacher_mu", "decode_rf_mu"]})
++    print(f"Decoded {len(rows)} views; metrics and sample panels: {out}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rrf_alignment/encode.py b/rrf_alignment/encode.py
+new file mode 100644
+index 0000000..67abdf9
+--- /dev/null
++++ b/rrf_alignment/encode.py
+@@ -0,0 +1,43 @@
++"""Cache the frozen visual VAE's deterministic mean, never a sampled z."""
++import argparse
++from pathlib import Path
++
++import torch
++
++from .cameras import cache_views, load_views
++from .common import finite_tensor, save_new, sha256_file
++from .vae import load_frozen_vae, load_image
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--views", required=True)
++    parser.add_argument("--vae-checkpoint", required=True)
++    parser.add_argument("--vae-config", help="JSON required if the checkpoint has no full configuration")
++    parser.add_argument("--output", required=True)
++    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
++    args = parser.parse_args()
++    output = Path(args.output).expanduser()
++    if output.exists():
++        raise FileExistsError(f"Choose a new target cache: {output}")
++    document, manifest_sha = load_views(args.views)
++    vae = load_frozen_vae(args.vae_checkpoint, args.vae_config, args.device)
++    means = []
++    metadata = cache_views(document)
++    with torch.no_grad():
++        for index, view in enumerate(document["views"]):
++            image = load_image(view, vae.config).unsqueeze(0).to(args.device)
++            mu, _ = vae.encode(image)
++            means.append(finite_tensor(mu[0], "VAE mean").cpu())
++            metadata[index]["image_sha256"] = sha256_file(view["image"])
++            if index == 0 or (index + 1) % 50 == 0:
++                print(f'Encoded {index + 1}/{len(metadata)}: {view["view_id"]}', flush=True)
++    save_new(output, {"schema_version": 1, "kind": "visual_means", "mu": torch.stack(means),
++                      "views": metadata, "manifest_sha256": manifest_sha,
++                      "vae_sha256": sha256_file(Path(args.vae_checkpoint).expanduser()),
++                      "vae_config": vars(vae.config), "preprocessing": "grayscale_L,Lanczos,0_to_1"})
++    print(f"Saved {len(means)} visual latent means to {output}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rrf_alignment/extract.py b/rrf_alignment/extract.py
+new file mode 100644
+index 0000000..8120cf8
+--- /dev/null
++++ b/rrf_alignment/extract.py
+@@ -0,0 +1,87 @@
++"""python -m rrf_alignment.extract --help"""
++import argparse
++from pathlib import Path
++
++import numpy as np
++from PIL import Image
++import torch
++
++from .cameras import cache_views, camera_rays, load_views
++from .common import fingerprint, save_new, write_json
++from .newrf import FrozenNeWRF
++
++
++def main():
++    parser = argparse.ArgumentParser(description="Extract camera-view NeWRF hidden-feature maps")
++    parser.add_argument("--newrf-root", required=True)
++    parser.add_argument("--config", required=True, help="YAML used to train this NeWRF checkpoint")
++    parser.add_argument("--checkpoint", required=True)
++    parser.add_argument("--views", required=True)
++    parser.add_argument("--output", required=True)
++    parser.add_argument("--model", choices=["coarse", "fine"], default="coarse")
++    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
++    parser.add_argument("--width", type=int, default=48)
++    parser.add_argument("--height", type=int, default=32)
++    parser.add_argument("--near", type=float, help="Default: training YAML sampling.near")
++    parser.add_argument("--far", type=float, help="Default: training YAML sampling.far")
++    parser.add_argument("--samples", type=int, help="Default: training YAML sampling.n_samples")
++    parser.add_argument("--fine-samples", type=int, help="Default: training YAML sampling.n_samples_hierarchical")
++    parser.add_argument("--inverse-depth", action=argparse.BooleanOptionalAction, default=None)
++    parser.add_argument("--carrier-ghz", type=float, default=2.4)
++    parser.add_argument("--ray-chunk", type=int, default=32)
++    parser.add_argument("--point-chunk", type=int, default=8192)
++    parser.add_argument("--limit", type=int, help="Use 1 for the first feature-map check")
++    args = parser.parse_args()
++    output = Path(args.output).expanduser()
++    if output.exists():
++        raise FileExistsError(f"Choose a new output cache: {output}")
++    document, manifest_sha = load_views(args.views)
++    if args.limit is not None:
++        if args.limit < 1:
++            raise ValueError("--limit must be positive")
++        document["views"] = document["views"][:args.limit]
++    field = FrozenNeWRF(args.newrf_root, args.config, args.checkpoint, args.model, args.device)
++    for argument, key in {"near": "near", "far": "far", "samples": "n_samples",
++                          "fine_samples": "n_samples_hierarchical", "inverse_depth": "inverse_depth"}.items():
++        if getattr(args, argument) is None:
++            if key not in field.sampling_config:
++                raise ValueError(f"Missing sampling.{key} in training YAML; specify --{argument.replace('_', '-')}")
++            setattr(args, argument, field.sampling_config[key])
++    settings = {key: getattr(args, key) for key in ("width", "height", "near", "far", "samples",
++                                                  "fine_samples", "inverse_depth", "carrier_ghz")}
++    fields, diagnostics = [], []
++    for index, view in enumerate(document["views"]):
++        origins, directions = camera_rays(view, document, args.width, args.height)
++        values, stats = field.extract(origins, directions, near=args.near, far=args.far,
++                                      samples=args.samples, fine_samples=args.fine_samples,
++                                      inverse_depth=args.inverse_depth, carrier_ghz=args.carrier_ghz,
++                                      ray_chunk=args.ray_chunk, point_chunk=args.point_chunk)
++        feature_map = values.T.reshape(-1, args.height, args.width).contiguous()
++        fields.append(feature_map)
++        diagnostics.append({"view_id": view["view_id"], **stats})
++        print(f'[{index + 1}/{len(document["views"])}] {view["view_id"]}: '
++              f'mass_mean={stats["mass_mean"]:.6g}, nonzero={stats["mass_nonzero_fraction"]:.3f}, '
++              f'feature_norm={stats["pooled_feature_norm_mean"]:.6g}', flush=True)
++        if index == 0:
++            preview = output.with_suffix("").with_name(output.stem + "_preview")
++            preview.mkdir(parents=True, exist_ok=True)
++            mass = feature_map[-1].numpy()
++            norm = feature_map[:-1].norm(dim=0).numpy()
++            Image.fromarray((np.clip(mass, 0, 1) * 255).astype(np.uint8)).save(preview / "mass.png")
++            scaled_norm = norm / max(float(norm.max()), 1e-12)
++            Image.fromarray((scaled_norm * 255).astype(np.uint8)).save(preview / "feature_norm.png")
++            write_json(preview / "preview.json", {"view_id": view["view_id"], "mass_display_range": [0, 1],
++                                                  "feature_norm_display_range": [0, float(norm.max())]})
++    provenance = {"newrf": field.provenance, "sampling": settings, "pooling": "sum(w*h),sum(w)"}
++    save_new(output, {"schema_version": 1, "kind": "rf_features", "features": torch.stack(fields),
++                      "views": cache_views(document), "manifest_sha256": manifest_sha,
++                      "provenance": provenance, "feature_signature": fingerprint(provenance)})
++    write_json(output.with_suffix(".diagnostics.json"), diagnostics)
++    print(f"Saved {tuple(torch.stack(fields).shape)} to {output}")
++    if max(row["mass_max"] for row in diagnostics) <= 1e-8:
++        print("WARNING: all sampled rays have negligible mass. Inspect the checkpoint, source version, "
++              "coordinate alignment and sampling before training an alignment model.")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rrf_alignment/newrf.py b/rrf_alignment/newrf.py
+new file mode 100644
+index 0000000..8438a43
+--- /dev/null
++++ b/rrf_alignment/newrf.py
+@@ -0,0 +1,144 @@
++"""Use the external training implementation without editing its density rule."""
++import importlib.util
++from pathlib import Path
++import sys
++
++import torch
++import yaml
++
++from .common import finite_tensor, load_tensor_file, sha256_file
++
++
++def _module(root, name):
++    path = root / f"{name}.py"
++    if not path.is_file():
++        raise FileNotFoundError(f"Missing NeWRF source file: {path}")
++    module_name = f"_rrf_external_{name}_{sha256_file(path)[:12]}"
++    spec = importlib.util.spec_from_file_location(module_name, path)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[module_name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++class FrozenNeWRF:
++    def __init__(self, root, config, checkpoint, model="coarse", device="cpu"):
++        root = Path(root).expanduser().resolve()
++        config, checkpoint = Path(config).expanduser(), Path(checkpoint).expanduser()
++        cfg = yaml.safe_load(config.read_text())
++        models = _module(root, "models")
++        encoders = _module(root, "encoders")
++        self.samplers = _module(root, "samplers")
++        self.synthesizer = _module(root, "synthesizers").Synthesizer()
++        self.synthesizer.return_bdc = False
++        self.device = torch.device(device)
++        self.model_name = model
++        self.sampling_config = cfg.get("sampling", {})
++        encoder_cfg, model_cfg = cfg["encoder"], cfg["models"]
++        if not encoder_cfg["use_viewdirs"]:
++            raise ValueError("This prototype requires NeWRF's direction-conditioned branch")
++        if encoder_cfg.get("use_fc_encoder", False):
++            raise ValueError("Frequency-conditioned NeWRF encoders are not supported by this adapter")
++        self.encode = encoders.PositionalEncoder(encoder_cfg["d_input"], encoder_cfg["n_freqs"],
++                                                 log_space=encoder_cfg["log_space"])
++        self.encode_viewdirs = encoders.PositionalEncoder(encoder_cfg["d_input"], encoder_cfg["n_freqs_views"],
++                                                          log_space=encoder_cfg["log_space"])
++        state = load_tensor_file(checkpoint)
++
++        def build(kind):
++            suffix = "_fine" if kind == "fine" else ""
++            net = models.NeWRF(d_input=self.encode.d_output,
++                               n_layers=model_cfg[f"n_layers{suffix}"],
++                               d_filter=model_cfg[f"d_filter{suffix}"],
++                               skip=tuple(model_cfg["skip"]),
++                               d_viewdirs=self.encode_viewdirs.d_output)
++            net.load_state_dict(state[f"{kind}_model_state_dict"], strict=True)
++            net.to(self.device).eval().requires_grad_(False)
++            return net
++
++        if model not in ("coarse", "fine"):
++            raise ValueError("model must be coarse or fine")
++        self.coarse = build("coarse")
++        if model == "fine" and not model_cfg["use_fine_model"]:
++            raise ValueError("The supplied configuration has no fine model")
++        self.selected = build("fine") if model == "fine" else self.coarse
++        self.feature_dim = self.selected.output.in_features
++        self.provenance = {
++            "checkpoint_sha256": sha256_file(checkpoint),
++            "config_sha256": sha256_file(config), "model": model,
++            "source_sha256": {n: sha256_file(root / f"{n}.py")
++                              for n in ("models", "encoders", "samplers", "synthesizers")},
++            "feature_layer": "output:input", "feature_dim": self.feature_dim,
++        }
++
++    def _query(self, model, points, directions, point_chunk, capture_features):
++        flat = points.reshape(-1, 3)
++        viewdirs = directions[:, None, :].expand_as(points).reshape(-1, 3)
++        raw_parts, feature_parts, captured = [], [], []
++        handle = None
++        if capture_features:
++            handle = model.output.register_forward_pre_hook(lambda _, args: captured.append(args[0]))
++        try:
++            for start in range(0, len(flat), point_chunk):
++                captured.clear()
++                raw = model(self.encode(flat[start:start + point_chunk]),
++                            self.encode_viewdirs(viewdirs[start:start + point_chunk]))
++                raw_parts.append(finite_tensor(raw, "NeWRF output"))
++                if capture_features:
++                    if len(captured) != 1:
++                        raise RuntimeError("Expected exactly one call to NeWRF.output per query")
++                    feature_parts.append(finite_tensor(captured[0], "hidden features"))
++        finally:
++            if handle is not None:
++                handle.remove()
++        raw = torch.cat(raw_parts).reshape(*points.shape[:-1], -1)
++        features = (torch.cat(feature_parts).reshape(*points.shape[:-1], -1)
++                    if capture_features else None)
++        return raw, features
++
++    def _weights(self, raw, z_vals, carrier_ghz):
++        # Use precisely the loaded synthesizer, including its first/last-bin rules.
++        result = self.synthesizer.synthesize(raw, z_vals, carrier_ghz, ray_batches=[len(raw)])
++        if not isinstance(result, (tuple, list)) or len(result) != 4:
++            raise RuntimeError("Expected NeWRF synthesizer to return (cfr, depth, amplitude, weights)")
++        weights = finite_tensor(result[3], "rendering weights")
++        if weights.shape != z_vals.shape or (weights < 0).any():
++            raise ValueError("Unexpected NeWRF rendering-weight shape or sign")
++        return weights
++
++    @torch.no_grad()
++    def extract(self, origins, directions, *, near, far, samples, fine_samples,
++                carrier_ghz=2.4, ray_chunk=32, point_chunk=8192, inverse_depth=False):
++        if not (0 < near < far) or samples < 3 or fine_samples < 1:
++            raise ValueError("Require 0 < near < far, samples >= 3, fine_samples >= 1")
++        if ray_chunk < 1 or point_chunk < 1 or carrier_ghz <= 0:
++            raise ValueError("Chunk sizes and carrier frequency must be positive")
++        pooled_parts, masses = [], []
++        positive, total, raw_min, raw_max = 0, 0, float("inf"), -float("inf")
++        for start in range(0, len(origins), ray_chunk):
++            o = torch.as_tensor(origins[start:start + ray_chunk], device=self.device)
++            d = torch.as_tensor(directions[start:start + ray_chunk], device=self.device)
++            points, z = self.samplers.sample_stratified(o, d, near, far, n_samples=samples,
++                                                       perturb=False, inverse_depth=inverse_depth)
++            raw, features = self._query(self.coarse, points, d, point_chunk, self.model_name == "coarse")
++            weights = self._weights(raw, z, carrier_ghz)
++            if self.model_name == "fine":
++                points, z, _, _ = self.samplers.sample_hierarchical(o, d, z, weights,
++                                                                  n_new_samples=fine_samples, perturb=False)
++                raw, features = self._query(self.selected, points, d, point_chunk, True)
++                weights = self._weights(raw, z, carrier_ghz)
++            pooled_parts.append((weights[..., None] * features).sum(1).cpu())
++            masses.append(weights.sum(1).cpu())
++            sigma_raw = raw[..., -1]
++            positive += int((sigma_raw > 0).sum())
++            total += sigma_raw.numel()
++            raw_min = min(raw_min, float(sigma_raw.min()))
++            raw_max = max(raw_max, float(sigma_raw.max()))
++        pooled, mass = torch.cat(pooled_parts), torch.cat(masses)
++        feature_map = finite_tensor(torch.cat((pooled, mass[:, None]), -1), "pooled feature map")
++        stats = {"raw_density_min": raw_min, "raw_density_max": raw_max,
++                 "raw_density_positive_fraction": positive / total,
++                 "mass_min": float(mass.min()), "mass_max": float(mass.max()),
++                 "mass_mean": float(mass.mean()), "mass_nonzero_fraction": float((mass > 1e-8).float().mean()),
++                 "pooled_feature_norm_mean": float(pooled.norm(dim=-1).mean())}
++        return feature_map, stats
+diff --git a/rrf_alignment/predict.py b/rrf_alignment/predict.py
+new file mode 100644
+index 0000000..d84499d
+--- /dev/null
++++ b/rrf_alignment/predict.py
+@@ -0,0 +1,34 @@
++"""Infer VAE means from additional camera-view RF feature maps."""
++import argparse
++
++import torch
++
++from .alignment import RFMapEncoder
++from .common import finite_tensor, load_tensor_file, save_new
++from .train import predict
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--checkpoint", required=True, help="Alignment best.pt")
++    parser.add_argument("--features", required=True)
++    parser.add_argument("--output", required=True)
++    parser.add_argument("--batch-size", type=int, default=16)
++    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
++    args = parser.parse_args()
++    checkpoint, cache = load_tensor_file(args.checkpoint), load_tensor_file(args.features)
++    if checkpoint["feature_signature"] != cache["feature_signature"]:
++        raise ValueError("NeWRF checkpoint/source, model choice or feature sampling settings differ from training")
++    x = finite_tensor(cache["features"], "RF features")
++    if args.batch_size < 1:
++        raise ValueError("Batch size must be positive")
++    model = RFMapEncoder(**checkpoint["model_config"]).to(args.device)
++    model.load_state_dict(checkpoint["model_state_dict"])
++    mu = predict(model, x, checkpoint["statistics"], args.device, args.batch_size)
++    save_new(args.output, {"kind": "predicted_visual_means", "mu": mu, "views": cache["views"],
++                           "vae_sha256": checkpoint["vae_sha256"], "vae_config": checkpoint["vae_config"]})
++    print(f"Saved {len(mu)} predicted means to {args.output}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rrf_alignment/prepare_views.py b/rrf_alignment/prepare_views.py
+new file mode 100644
+index 0000000..ead2b6c
+--- /dev/null
++++ b/rrf_alignment/prepare_views.py
+@@ -0,0 +1,76 @@
++"""Convert Blender/NeRF-style GS transforms to an explicit image/pose manifest."""
++import argparse
++import json
++import math
++from pathlib import Path
++
++from PIL import Image
++
++from .cameras import load_views
++from .common import fingerprint, write_json
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--transforms", required=True, help="Blender-style camera_to_world transform_matrix JSON")
++    parser.add_argument("--rf-from-world", required=True, help="JSON containing an explicit 4x4 similarity matrix")
++    parser.add_argument("--image-map", help="JSON: source file_path -> actual GS rendered image path")
++    parser.add_argument("--output", required=True)
++    args = parser.parse_args()
++    source = Path(args.transforms).expanduser().resolve()
++    output = Path(args.output).expanduser()
++    if output.exists():
++        raise FileExistsError(output)
++    transforms = json.loads(source.read_text())
++    mapping_path = Path(args.image_map).expanduser().resolve() if args.image_map else None
++    mapping = json.loads(mapping_path.read_text()) if mapping_path else None
++    matrix = json.loads(Path(args.rf_from_world).expanduser().read_text())
++    views = []
++    for frame in transforms["frames"]:
++        name = frame["file_path"]
++        if mapping is not None:
++            if name not in mapping:
++                raise ValueError(f"Missing explicit GS image mapping: {name}")
++            image_path = mapping_path.parent / mapping[name]
++        else:
++            image_path = source.parent / name
++            if not image_path.is_file() and not image_path.suffix:
++                image_path = image_path.with_suffix(".png")
++        image_path = image_path.resolve()
++        with Image.open(image_path) as image:
++            width, height = image.size
++        settings = {**transforms, **frame}
++        if any(key in settings and settings[key] != size for key, size in (("w", width), ("h", height))):
++            raise ValueError(f"{name}: camera metadata and image size differ")
++        if "fl_x" in settings:
++            fx = float(settings["fl_x"])
++        else:
++            angle = float(settings["camera_angle_x"])
++            if not 0 < angle < math.pi:
++                raise ValueError("camera_angle_x must be in radians, between 0 and pi")
++            fx = 0.5 * width / math.tan(0.5 * angle)
++        if "fl_y" in settings:
++            fy = float(settings["fl_y"])
++        elif "camera_angle_y" in settings:
++            angle_y = float(settings["camera_angle_y"])
++            if not 0 < angle_y < math.pi:
++                raise ValueError("camera_angle_y must be in radians, between 0 and pi")
++            fy = 0.5 * height / math.tan(0.5 * angle_y)
++        else:
++            fy = fx  # Blender/GS's square-pixel, horizontal-FOV camera model.
++        pose = frame["transform_matrix"]
++        position = [round(pose[i][3], 6) for i in range(3)]
++        views.append({"view_id": frame.get("view_id", name),
++                      "receiver_id": str(frame.get("receiver_id", "rx_" + fingerprint(position)[:16])),
++                      "image": str(image_path), "camera_to_world": pose,
++                      "intrinsics": {"width": width, "height": height, "fx": fx, "fy": fy,
++                                     "cx": settings.get("cx", width / 2), "cy": settings.get("cy", height / 2)},
++                      **({"split": frame["split"]} if "split" in frame else {})})
++    document = {"schema_version": 1, "camera_convention": "opengl", "rf_from_world": matrix, "views": views}
++    write_json(output, document)
++    load_views(output)
++    print(f"Wrote {len(views)} explicit image/pose pairs to {output}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rrf_alignment/train.py b/rrf_alignment/train.py
+new file mode 100644
+index 0000000..4673e79
+--- /dev/null
++++ b/rrf_alignment/train.py
+@@ -0,0 +1,120 @@
++"""Train only the RF map CNN against cached means from a frozen VAE."""
++import argparse
++import random
++from pathlib import Path
++
++import numpy as np
++import torch
++from torch import nn
++from torch.utils.data import DataLoader, TensorDataset
++
++from .alignment import RFMapEncoder, pair_caches, split_views, training_statistics
++from .common import finite_tensor, load_tensor_file, save_new, sha256_file, write_json
++
++
++@torch.no_grad()
++def predict(model, x, stats, device, batch_size):
++    if not len(x):
++        return torch.empty((0, stats["y_mean"].shape[1]))
++    predictions = []
++    model.eval()
++    for batch in x.split(batch_size):
++        normalized = ((batch - stats["x_mean"]) / stats["x_std"]).to(device)
++        mu = model(normalized).cpu() * stats["y_std"] + stats["y_mean"]
++        predictions.append(finite_tensor(mu, "predicted mean"))
++    return torch.cat(predictions)
++
++
++def metrics(pred, target, mean):
++    return {"latent_mse": float(nn.functional.mse_loss(pred, target)),
++            "latent_mae": float(nn.functional.l1_loss(pred, target)),
++            "mean_baseline_mse": float(nn.functional.mse_loss(mean.expand_as(target), target))}
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--features", required=True)
++    parser.add_argument("--targets", required=True)
++    parser.add_argument("--output-dir", required=True)
++    parser.add_argument("--epochs", type=int, default=200)
++    parser.add_argument("--batch-size", type=int, default=16)
++    parser.add_argument("--lr", type=float, default=1e-3)
++    parser.add_argument("--seed", type=int, default=0)
++    parser.add_argument("--val-fraction", type=float, default=0.2)
++    parser.add_argument("--test-fraction", type=float, default=0.1)
++    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
++    args = parser.parse_args()
++    if args.epochs < 1 or args.batch_size < 1 or args.lr <= 0:
++        raise ValueError("Epochs, batch size and learning rate must be positive")
++    random.seed(args.seed)
++    np.random.seed(args.seed)
++    torch.manual_seed(args.seed)
++    if torch.cuda.is_available():
++        torch.cuda.manual_seed_all(args.seed)
++    features, targets = load_tensor_file(args.features), load_tensor_file(args.targets)
++    x, y, views = pair_caches(features, targets)
++    splits = split_views(views, args.seed, args.val_fraction, args.test_fraction)
++    stats = training_statistics(x, y, splits["train"])
++    out = Path(args.output_dir).expanduser()
++    out.mkdir(parents=True, exist_ok=False)
++    write_json(out / "splits.json", {k: [views[i]["view_id"] for i in indices] for k, indices in splits.items()})
++    write_json(out / "arguments.json", vars(args))
++    config = {"in_channels": x.shape[1], "latent_dim": y.shape[1]}
++    model = RFMapEncoder(**config).to(args.device)
++    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
++    x_train = (x[splits["train"]] - stats["x_mean"]) / stats["x_std"]
++    loader = DataLoader(TensorDataset(x_train, y[splits["train"]]), batch_size=args.batch_size,
++                        shuffle=True, generator=torch.Generator().manual_seed(args.seed))
++    y_mean, y_std = stats["y_mean"].to(args.device), stats["y_std"].to(args.device)
++    features_sha = sha256_file(Path(args.features).expanduser())
++    targets_sha = sha256_file(Path(args.targets).expanduser())
++    best, history = float("inf"), []
++    for epoch in range(1, args.epochs + 1):
++        model.train()
++        squared_error, count = 0.0, 0
++        for batch, target in loader:
++            batch, target = batch.to(args.device), target.to(args.device)
++            optimizer.zero_grad(set_to_none=True)
++            mu = model(batch) * y_std + y_mean
++            # Plain MSE in the original VAE mean coordinates. No sampled latent.
++            loss = nn.functional.mse_loss(mu, target)
++            finite_tensor(loss, "training loss")
++            loss.backward()
++            optimizer.step()
++            squared_error += float(loss.detach()) * len(batch)
++            count += len(batch)
++        val_pred = predict(model, x[splits["val"]], stats, args.device, args.batch_size)
++        val_metrics = metrics(val_pred, y[splits["val"]], stats["y_mean"])
++        row = {"epoch": epoch, "train_mse": squared_error / count, **val_metrics}
++        history.append(row)
++        print(f'Epoch {epoch}: train={row["train_mse"]:.6f}, val={row["latent_mse"]:.6f}, '
++              f'mean_baseline={row["mean_baseline_mse"]:.6f}', flush=True)
++        if row["latent_mse"] < best:
++            best = row["latent_mse"]
++            torch.save({"schema_version": 1, "model_state_dict": model.state_dict(), "model_config": config,
++                        "statistics": stats, "epoch": epoch, "val_mse": best,
++                        "feature_signature": features["feature_signature"],
++                        "feature_provenance": features["provenance"],
++                        "vae_sha256": targets["vae_sha256"], "vae_config": targets["vae_config"],
++                        "features_sha256": features_sha,
++                        "targets_sha256": targets_sha,
++                        "splits": splits, "views": views}, out / "best.pt")
++        write_json(out / "history.json", history)
++    saved = load_tensor_file(out / "best.pt")
++    model.load_state_dict(saved["model_state_dict"])
++    report = {"best_epoch": saved["epoch"], "splits": {}}
++    predictions = {}
++    for name, indices in splits.items():
++        if not indices:
++            continue
++        pred = predict(model, x[indices], stats, args.device, args.batch_size)
++        report["splits"][name] = {"views": len(indices), **metrics(pred, y[indices], stats["y_mean"])}
++        predictions[name] = {"pred_mu": pred, "target_mu": y[indices], "views": [views[i] for i in indices]}
++    save_new(out / "predictions.pt", {"kind": "latent_predictions", "splits": predictions,
++                                       "vae_sha256": targets["vae_sha256"], "vae_config": targets["vae_config"]})
++    write_json(out / "metrics.json", report)
++    print(f"Saved the best validation checkpoint and predictions to {out}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rrf_alignment/vae.py b/rrf_alignment/vae.py
+new file mode 100644
+index 0000000..2e8792a
+--- /dev/null
++++ b/rrf_alignment/vae.py
+@@ -0,0 +1,169 @@
++"""VAE architecture retained from the user's train_projection_head2.py."""
++from dataclasses import dataclass
++import json
++import math
++from pathlib import Path
++from typing import List, Tuple
++
++import numpy as np
++from PIL import Image
++import torch
++from torch import Tensor
++import torch.nn as nn
++
++from .common import load_tensor_file
++
++@dataclass
++class VAEConfig:
++    image_height: int = 800
++    image_width: int = 1200
++    in_channels: int = 1
++    latent_dim: int = 32
++    channels: Tuple[int, ...] = (32, 64, 128, 256, 256, 256)
++
++
++def _group_norm(channels: int) -> nn.GroupNorm:
++    return nn.GroupNorm(num_groups=min(8, channels), num_channels=channels)
++
++
++class GrayVectorVAE(nn.Module):
++    """A convolutional VAE whose per-image latent is a vector [latent_dim]."""
++
++    def __init__(self, config: VAEConfig) -> None:
++        super().__init__()
++        self.config = config
++
++        encoder_layers: List[nn.Module] = []
++        in_ch = config.in_channels
++        for out_ch in config.channels:
++            encoder_layers.extend(
++                [
++                    nn.Conv2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1),
++                    _group_norm(out_ch),
++                    nn.SiLU(inplace=True),
++                ]
++            )
++            in_ch = out_ch
++        self.encoder_cnn = nn.Sequential(*encoder_layers)
++
++        spatial_sizes = [(config.image_height, config.image_width)]
++        h, w = config.image_height, config.image_width
++        for _ in config.channels:
++            h, w = h // 2, w // 2
++            if h < 1 or w < 1:
++                raise ValueError("Image size is too small for the number of downsampling blocks.")
++            spatial_sizes.append((h, w))
++
++        self.encoded_height, self.encoded_width = spatial_sizes[-1]
++        flat_dim = config.channels[-1] * self.encoded_height * self.encoded_width
++        self.flat_dim = flat_dim
++
++        self.fc_mu = nn.Linear(flat_dim, config.latent_dim)
++        self.fc_logvar = nn.Linear(flat_dim, config.latent_dim)
++        self.fc_decode = nn.Linear(config.latent_dim, flat_dim)
++
++        decoder_output_channels = list(reversed(config.channels[:-1])) + [config.in_channels]
++        decoder_layers: List[nn.Module] = []
++
++        current_h, current_w = spatial_sizes[-1]
++        decoder_in_ch = config.channels[-1]
++        target_sizes = list(reversed(spatial_sizes[:-1]))
++
++        for i, (out_ch, (target_h, target_w)) in enumerate(
++            zip(decoder_output_channels, target_sizes)
++        ):
++            output_padding = (target_h - 2 * current_h, target_w - 2 * current_w)
++            if output_padding[0] not in (0, 1) or output_padding[1] not in (0, 1):
++                raise ValueError(f"Invalid decoder output_padding={output_padding}")
++
++            decoder_layers.append(
++                nn.ConvTranspose2d(
++                    decoder_in_ch,
++                    out_ch,
++                    kernel_size=4,
++                    stride=2,
++                    padding=1,
++                    output_padding=output_padding,
++                )
++            )
++
++            is_last = i == len(decoder_output_channels) - 1
++            if not is_last:
++                decoder_layers.extend([_group_norm(out_ch), nn.SiLU(inplace=True)])
++
++            current_h, current_w = target_h, target_w
++            decoder_in_ch = out_ch
++
++        decoder_layers.append(nn.Sigmoid())
++        self.decoder_cnn = nn.Sequential(*decoder_layers)
++
++    def encode(self, x: Tensor) -> Tuple[Tensor, Tensor]:
++        features = self.encoder_cnn(x).flatten(start_dim=1)
++        mu = self.fc_mu(features)
++        logvar = self.fc_logvar(features).clamp(min=-12.0, max=12.0)
++        return mu, logvar
++
++    @staticmethod
++    def reparameterize(mu: Tensor, logvar: Tensor) -> Tensor:
++        std = torch.exp(0.5 * logvar)
++        eps = torch.randn_like(std)
++        return mu + eps * std
++
++    def decode(self, z: Tensor) -> Tensor:
++        h = self.fc_decode(z)
++        h = h.view(-1, self.config.channels[-1], self.encoded_height, self.encoded_width)
++        return self.decoder_cnn(h)
++
++    def forward(self, x: Tensor, sample: bool = True) -> Tuple[Tensor, Tensor, Tensor]:
++        mu, logvar = self.encode(x)
++        z = self.reparameterize(mu, logvar) if sample else mu
++        recon = self.decode(z)
++        return recon, mu, logvar
++
++
++def load_frozen_vae(checkpoint, config_path=None, device="cpu"):
++    """Load the user's train_gray_vae2 / train_projection_head2 checkpoint."""
++    checkpoint = Path(checkpoint).expanduser()
++    saved = load_tensor_file(checkpoint)
++    if not isinstance(saved, dict):
++        raise TypeError("Expected a VAE state_dict or a dictionary checkpoint")
++    config = dict(saved.get("config", {}))
++    if config_path is not None:
++        supplied = json.loads(Path(config_path).expanduser().read_text())
++        for key, value in supplied.items():
++            def comparable(item):
++                if key != "channels":
++                    return item
++                return tuple(int(x) for x in (item.split(",") if isinstance(item, str) else item))
++            if key in config and comparable(config[key]) != comparable(value):
++                raise ValueError(f"VAE configuration conflicts with checkpoint: {key}")
++        config.update(supplied)
++    required = ("image_height", "image_width", "in_channels", "latent_dim", "channels")
++    missing = [key for key in required if key not in config]
++    if missing:
++        raise ValueError(f"Missing VAE settings {missing}; supply --vae-config JSON")
++    channels = config["channels"]
++    if isinstance(channels, str):
++        channels = [int(value) for value in channels.split(",")]
++    cfg = VAEConfig(image_height=int(config["image_height"]), image_width=int(config["image_width"]),
++                    in_channels=int(config["in_channels"]), latent_dim=int(config["latent_dim"]),
++                    channels=tuple(channels))
++    if cfg.in_channels != 1:
++        raise ValueError("This checkpoint adapter expects the existing grayscale VAE")
++    state = saved.get("model_state", saved.get("model_state_dict", saved))
++    vae = GrayVectorVAE(cfg)
++    vae.load_state_dict(state, strict=True)
++    return vae.to(device).eval().requires_grad_(False)
++
++
++def load_image(view, config):
++    """Keep the grayscale and Lanczos preprocessing of the previous VAE code."""
++    with Image.open(view["image"]) as image:
++        expected = (view["intrinsics"]["width"], view["intrinsics"]["height"])
++        if image.size != expected:
++            raise ValueError(f'{view["view_id"]}: image size {image.size} != camera size {expected}')
++        if not math.isclose(image.width / image.height, config.image_width / config.image_height,
++                            rel_tol=1e-6):
++            raise ValueError("Teacher image and VAE must have the same aspect ratio")
++        image = image.convert("L").resize((config.image_width, config.image_height), Image.Resampling.LANCZOS)
++        return torch.from_numpy(np.asarray(image, dtype=np.float32).copy()).unsqueeze(0) / 255.0
+diff --git a/tests/test_alignment.py b/tests/test_alignment.py
+new file mode 100644
+index 0000000..ee4b195
+--- /dev/null
++++ b/tests/test_alignment.py
+@@ -0,0 +1,182 @@
++import copy
++from dataclasses import asdict
++import json
++import os
++from pathlib import Path
++import tempfile
++import unittest
++
++import numpy as np
++import torch
++import yaml
++
++from rrf_alignment.alignment import RFMapEncoder, pair_caches, split_views, training_statistics
++from rrf_alignment.cameras import camera_rays, load_views
++from rrf_alignment.newrf import FrozenNeWRF, _module
++from rrf_alignment.vae import GrayVectorVAE, VAEConfig, load_frozen_vae
++
++torch.set_num_threads(1)
++
++
++def view(i, receiver=None, x=None):
++    pose = np.eye(4)
++    pose[0, 3] = i if x is None else x
++    return {"view_id": str(i), "receiver_id": str(i if receiver is None else receiver),
++            "image": f"/image/{i}.png", "camera_to_world": pose.tolist(),
++            "intrinsics": {"width": 3, "height": 3, "fx": 1.5, "fy": 1.5, "cx": 1.5, "cy": 1.5},
++            "rf_origin": [pose[0, 3], 0, 0], "camera_signature": f"camera{i}", "split": None}
++
++
++class CameraAndDataTests(unittest.TestCase):
++    def test_center_corner_and_similarity_transform(self):
++        transform = np.eye(4)
++        transform[:3, :3] *= 2
++        transform[:3, 3] = [3, 4, 5]
++        doc = {"camera_convention": "opencv", "rf_from_world": transform.tolist()}
++        origins, rays = camera_rays(view(1), doc, 3, 3)
++        np.testing.assert_allclose(origins[4], [5, 4, 5])
++        np.testing.assert_allclose(rays[4], [0, 0, 1])
++        np.testing.assert_allclose(np.linalg.norm(rays, axis=1), 1, rtol=1e-6)
++        self.assertLess(rays[0, 0], 0)
++        self.assertLess(rays[0, 1], 0)
++        doc["camera_convention"] = "opengl"
++        _, gl = camera_rays(view(1), doc, 3, 3)
++        np.testing.assert_allclose(gl[4], [0, 0, -1])
++        self.assertGreater(gl[0, 1], 0)
++
++    def test_pose_rotation_changes_the_forward_ray(self):
++        v = view(0)
++        v["camera_to_world"] = [[0, 0, 1, 0], [0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 0, 1]]
++        _, rays = camera_rays(v, {"camera_convention": "opencv", "rf_from_world": np.eye(4).tolist()}, 3, 3)
++        np.testing.assert_allclose(rays[4], [1, 0, 0])
++
++    def test_rejects_unregistered_or_invalid_cameras(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "views.json"
++            doc = {"schema_version": 1, "camera_convention": "opencv", "views": [view(0)]}
++            path.write_text(json.dumps(doc))
++            with self.assertRaises(KeyError):
++                load_views(path)
++            doc["rf_from_world"] = np.eye(4).tolist()
++            doc["rf_from_world"][0][0] = 2  # nonuniform scale would bend the camera geometry
++            path.write_text(json.dumps(doc))
++            with self.assertRaises(ValueError):
++                load_views(path)
++
++    def test_pairing_uses_view_id_and_checks_camera(self):
++        features = {"kind": "rf_features", "schema_version": 1,
++                    "features": torch.ones(2, 3, 4, 6), "views": [view(0), view(1)]}
++        targets = {"kind": "visual_means", "schema_version": 1,
++                   "mu": torch.tensor([[20.0], [10.0]]), "views": [view(1), view(0)]}
++        _, y, _ = pair_caches(features, targets)
++        torch.testing.assert_close(y[:, 0], torch.tensor([10.0, 20.0]))
++        targets["views"][0]["camera_signature"] = "another-camera"
++        with self.assertRaisesRegex(ValueError, "camera_signature"):
++            pair_caches(features, targets)
++
++    def test_rejects_zero_mass_before_training(self):
++        features = {"kind": "rf_features", "schema_version": 1,
++                    "features": torch.zeros(2, 3, 4, 6), "views": [view(0), view(1)]}
++        targets = {"kind": "visual_means", "schema_version": 1,
++                   "mu": torch.zeros(2, 2), "views": [view(0), view(1)]}
++        with self.assertRaisesRegex(ValueError, "mass is zero"):
++            pair_caches(features, targets)
++
++    def test_receiver_groups_and_aliases_never_cross_splits(self):
++        views = [view(i) for i in range(8)] + [view(8, receiver="alias", x=0)]
++        result = split_views(views)
++        for indices in result.values():
++            self.assertEqual(0 in indices, 8 in indices)
++        views[0]["split"] = "train"
++        views[8]["split"] = "val"
++        for v in views[1:8]:
++            v["split"] = "train"
++        with self.assertRaisesRegex(ValueError, "multiple splits"):
++            split_views(views)
++
++    def test_normalization_never_uses_held_out_rows(self):
++        x = torch.tensor([1.0, 3.0, 10000.0])[:, None, None, None].expand(-1, 2, 4, 6)
++        y = torch.tensor([[2.0], [4.0], [9000.0]])
++        stats = training_statistics(x, y, [0, 1])
++        torch.testing.assert_close(stats["x_mean"], torch.full((1, 2, 1, 1), 2.0))
++        torch.testing.assert_close(stats["y_mean"], torch.tensor([[3.0]]))
++
++
++class LearningTests(unittest.TestCase):
++    def test_cnn_can_fit_small_latent_targets(self):
++        torch.manual_seed(4)
++        x, y = torch.randn(6, 5, 16, 24), torch.randn(6, 3)
++        model = RFMapEncoder(5, 3)
++        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
++        initial = float((model(x) - y).square().mean().detach())
++        for _ in range(70):
++            optimizer.zero_grad()
++            loss = (model(x) - y).square().mean()
++            loss.backward()
++            optimizer.step()
++        self.assertLess(float((model(x) - y).square().mean().detach()), initial * 0.05)
++
++    def test_previous_vae_checkpoint_keys_and_freezing(self):
++        cfg = VAEConfig(image_height=16, image_width=24, latent_dim=3, channels=(8, 16))
++        model = GrayVectorVAE(cfg).eval()
++        x = torch.rand(1, 1, 16, 24)
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "vae.pt"
++            config_path = Path(directory) / "vae.json"
++            config_path.write_text(json.dumps(asdict(cfg)))
++            for key in ("model_state", "model_state_dict"):
++                torch.save({key: model.state_dict(), "config": asdict(cfg)}, path)
++                loaded = load_frozen_vae(path, config_path)
++                self.assertTrue(all(not p.requires_grad for p in loaded.parameters()))
++                torch.testing.assert_close(loaded.encode(x)[0], model.encode(x)[0])
++                latent = torch.randn(1, 3, requires_grad=True)
++                loaded.decode(latent).mean().backward()
++                self.assertGreater(float(latent.grad.abs().sum()), 0)
++                self.assertTrue(all(p.grad is None for p in loaded.parameters()))
++
++
++@unittest.skipUnless(os.environ.get("NEWRF_TEST_ROOT"), "Set NEWRF_TEST_ROOT to test the real external NeWRF code")
++class ExternalNeWRFTests(unittest.TestCase):
++    def test_checkpoint_hook_sampling_and_chunking(self):
++        root = Path(os.environ["NEWRF_TEST_ROOT"])
++        cfg = yaml.safe_load((root / "config/default.yaml").read_text())
++        m, e = _module(root, "models"), _module(root, "encoders")
++        ec, mc = cfg["encoder"], cfg["models"]
++        enc = e.PositionalEncoder(ec["d_input"], ec["n_freqs"])
++        directions = e.PositionalEncoder(ec["d_input"], ec["n_freqs_views"])
++        torch.manual_seed(3)
++        state = {}
++        for kind in ("coarse", "fine"):
++            suffix = "_fine" if kind == "fine" else ""
++            net = m.NeWRF(enc.d_output, mc[f"n_layers{suffix}"], mc[f"d_filter{suffix}"],
++                          tuple(mc["skip"]), directions.d_output)
++            with torch.no_grad():
++                net.alpha_out.weight.zero_()
++                net.alpha_out.bias.fill_(1.0)
++            state[f"{kind}_model_state_dict"] = net.state_dict()
++        with tempfile.TemporaryDirectory() as directory:
++            checkpoint = Path(directory) / "synthetic.pt"
++            torch.save(state, checkpoint)
++            origins = np.array([[0.0, 0, 0], [1.0, 0, 0]], dtype=np.float32)
++            rays = np.array([[0.0, 0, 1], [0.0, 1, 0]], dtype=np.float32)
++            for kind in ("coarse", "fine"):
++                field = FrozenNeWRF(root, root / "config/default.yaml", checkpoint, kind)
++                a, stats = field.extract(origins, rays, near=0.01, far=3, samples=12,
++                                         fine_samples=8, ray_chunk=1, point_chunk=5)
++                b, _ = field.extract(origins, rays, near=0.01, far=3, samples=12,
++                                      fine_samples=8, ray_chunk=2, point_chunk=100)
++                self.assertEqual(a.shape, (2, mc[f'd_filter{"_fine" if kind == "fine" else ""}'] // 2 + 1))
++                torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-6)
++                self.assertGreater(stats["mass_mean"], 0)
++                self.assertTrue(all(not p.requires_grad for p in field.selected.parameters()))
++                self.assertFalse(field.selected.output._forward_pre_hooks)
++            # Respect the loaded synthesizer's unusual first-bin rule exactly.
++            raw = torch.tensor([[[0.0, 0.0, 1.0]] * 3])
++            z = torch.tensor([[0.0, 1.0, 2.0]])
++            weights = field._weights(raw, z, 2.4)
++            torch.testing.assert_close(weights[0, 0], torch.tensor(0.0))
++            torch.testing.assert_close(weights[0, 1], (1 - torch.exp(torch.tensor(-1.0))) * torch.exp(torch.tensor(-1.0)))
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.51.1
+

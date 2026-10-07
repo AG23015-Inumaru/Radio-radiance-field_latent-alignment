@@ -12,4 +12,4 @@ docker build \
   --build-arg USER_ID=${USER_ID} \
   --build-arg USER_GID=${USER_GID} \
   --build-arg REQS_PATH=${REQS_PATH} \
-  -t pytorch_temp .
+  -t radio-radiance-field_latent-alignment .

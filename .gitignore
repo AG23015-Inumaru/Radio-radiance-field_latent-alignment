@@ -15,3 +15,14 @@ __pycache__/
 
 # Jupyter temporary files
 .ipynb_checkpoints/
+
+# Local alignment data and experiment outputs
+outputs/
+Temp/
+runs/
+data/
+configs/local/
+.venv/
+
+# Synology metadata
+@eaDir/
