@@ -6,7 +6,7 @@ import sys
 import torch
 import yaml
 
-from .common import finite_tensor, load_tensor_file, sha256_file
+from ..common import finite_tensor, load_tensor_file, sha256_file
 
 
 def _module(root, name):

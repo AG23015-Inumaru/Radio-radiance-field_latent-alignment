@@ -11,7 +11,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 
-from .common import load_tensor_file
+from ..common import load_tensor_file
 
 @dataclass
 class VAEConfig:

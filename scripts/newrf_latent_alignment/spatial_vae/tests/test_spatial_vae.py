@@ -11,11 +11,11 @@ from PIL import Image
 import torch
 
 from scripts.newrf_latent_alignment.common import load_tensor_file
-from scripts.newrf_latent_alignment.sptialVAE.encode_vae_map import main as encode_main
-from scripts.newrf_latent_alignment.sptialVAE.evaluate_vae_map import main as evaluate_main
-from scripts.newrf_latent_alignment.sptialVAE.map_utils import load_map_checkpoint, load_split_manifest
-from scripts.newrf_latent_alignment.sptialVAE.train_vae_map import main as train_main
-from scripts.newrf_latent_alignment.sptialVAE.vae_map import GrayMapVAE, MapVAEConfig, loss_terms
+from scripts.newrf_latent_alignment.spatial_vae.encode_vae_map import main as encode_main
+from scripts.newrf_latent_alignment.spatial_vae.evaluate_vae_map import main as evaluate_main
+from scripts.newrf_latent_alignment.spatial_vae.map_utils import load_map_checkpoint, load_split_manifest
+from scripts.newrf_latent_alignment.spatial_vae.train_vae_map import main as train_main
+from scripts.newrf_latent_alignment.spatial_vae.vae_map import GrayMapVAE, MapVAEConfig, loss_terms
 
 
 torch.set_num_threads(1)

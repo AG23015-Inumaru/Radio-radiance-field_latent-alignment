@@ -9,7 +9,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from .alignment import RFMapEncoder, pair_caches, split_views, training_statistics
-from .common import finite_tensor, load_tensor_file, save_new, sha256_file, write_json
+from ..common import finite_tensor, load_tensor_file, save_new, sha256_file, write_json
 
 
 @torch.no_grad()

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import torch
 
-from .cameras import cache_views, load_views
-from .common import finite_tensor, save_new, sha256_file
+from ..views.cameras import cache_views, load_views
+from ..common import finite_tensor, save_new, sha256_file
 from .vae import load_frozen_vae, load_image
 
 

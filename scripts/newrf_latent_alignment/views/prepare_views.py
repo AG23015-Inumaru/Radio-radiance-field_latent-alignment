@@ -7,7 +7,7 @@ from pathlib import Path
 from PIL import Image
 
 from .cameras import load_views
-from .common import fingerprint, write_json
+from ..common import fingerprint, write_json
 
 
 def main():

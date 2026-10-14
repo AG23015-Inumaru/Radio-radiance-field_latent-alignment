@@ -4,7 +4,7 @@ import argparse
 import torch
 
 from .alignment import RFMapEncoder
-from .common import finite_tensor, load_tensor_file, save_new
+from ..common import finite_tensor, load_tensor_file, save_new
 from .train import predict
 
 

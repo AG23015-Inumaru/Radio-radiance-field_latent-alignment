@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .common import fingerprint
+from ..common import fingerprint
 
 
 def _matrix(value, label, similarity=False):

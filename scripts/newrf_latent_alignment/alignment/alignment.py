@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from .common import finite_tensor
+from ..common import finite_tensor
 
 
 class RFMapEncoder(nn.Module):

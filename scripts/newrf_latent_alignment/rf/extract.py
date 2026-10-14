@@ -7,8 +7,8 @@ import numpy as np
 from PIL import Image
 import torch
 
-from .cameras import cache_views, camera_rays, load_views
-from .common import fingerprint, save_new, write_json
+from ..views.cameras import cache_views, camera_rays, load_views
+from ..common import fingerprint, save_new, write_json
 from .newrf import FrozenNeWRF
 
 

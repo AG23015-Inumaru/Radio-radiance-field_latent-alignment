@@ -4,10 +4,10 @@ from pathlib import Path
 
 import torch
 
-from ..cameras import cache_views
+from ..views.cameras import cache_views
 from ..common import finite_tensor, save_new, sha256_file, write_json
 from .map_utils import config_dict, load_map_checkpoint, load_split_manifest
-from ..vae import load_image
+from ..vae.vae import load_image
 
 
 def main(argv=None):

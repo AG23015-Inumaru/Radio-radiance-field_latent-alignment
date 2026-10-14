@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image
 import torch
 
-from .common import finite_tensor, load_tensor_file, sha256_file, write_json
+from ..common import finite_tensor, load_tensor_file, sha256_file, write_json
 from .vae import load_frozen_vae, load_image
 
 

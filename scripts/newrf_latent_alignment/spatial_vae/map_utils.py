@@ -9,10 +9,10 @@ from PIL import Image, ImageDraw
 import torch
 from torch.utils.data import Dataset
 
-from ..alignment import split_views
-from ..cameras import cache_views, load_views
+from ..alignment.alignment import split_views
+from ..views.cameras import cache_views, load_views
 from ..common import finite_tensor, load_tensor_file
-from ..vae import load_image
+from ..vae.vae import load_image
 from .vae_map import GrayMapVAE, MapVAEConfig, loss_terms
 
 
