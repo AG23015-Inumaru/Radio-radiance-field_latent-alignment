@@ -8,35 +8,21 @@ NeWRFの学習と可視画像用Gaussian Splattingの学習・レンダリング
 
 | 場所 | 内容 |
 |---|---|
-| `scripts/newrf_latent_alignment/` | 今回の特徴抽出・潜在整合・画像復元のPythonコード、依存パッケージ一覧 |
+| `scripts/newrf_latent_alignment/` | 特徴抽出・latent alignment・可視画像のVAEモデルのコード|
 | `scripts/newrf_latent_alignment/tests/` | 上記コードの動作確認 |
-| `configs/newrf_latent_alignment/` | カメラ対応表・VAE設定の記入例 |
-| `configs/local/` | 自分の環境に合わせた設定。Git管理対象外 |
-| `outputs/newrf_latent_alignment/exp001/` | 1実験分の特徴・学習結果・復元画像。Git管理対象外 |
+| `configs/newrf_latent_alignment/` | カメラ対応表・VAE設定の設定 |
+| `outputs/newrf_latent_alignment/exp001/` |出力保管場所・Git管轄外|
 | `docs/newrf_latent_alignment.md` | 実行手順と特徴量の説明 |
 | `archive/setup/` | 導入時のパッチと以前の起動スクリプトの控え |
-| `Dockerfile/`, `docker_run.sh` | このリポジトリの実行環境 |
 
 Pythonコードは `scripts/` に置きます。生成されるファイルは `outputs/` にまとめ、
 実験を変える際は `exp001` を `exp002` などに変えます。
 出力先は各コマンドの `--output` / `--output-dir` で指定します。
 
 元データと外部モデルは別リポジトリ側のパスを参照します。
-このリポジトリの `dataset/` などに既に置いた手元のデータは、今回の整理では移動・削除しません。
-コンテナを使う場合は、外部ファイルをコンテナ内から参照できるようにマウントしてください。
+datasetファイルに，入力データは保存
 
-## 最初の確認
-
-以下のコマンドは、このリポジトリのルート（コンテナ内では `/workspace`）から実行します。
-
-```bash
-python -m pip install -r scripts/newrf_latent_alignment/requirements.txt
-python -m scripts.newrf_latent_alignment.extract --help
-```
-
-PyTorchは使用しているCUDA環境に合うものを利用してください。
-
-次は、成功したNeWRFのチェックポイント・学習時YAML・ソースを指定し、1視点分のRF特徴を抽出します。
+成功したNeWRFのチェックポイント・学習時YAML・ソースを指定し、1視点分のRF特徴を抽出します。
 [詳しい実行手順](docs/newrf_latent_alignment.md)に沿って進めてください。
 
 ## 可視画像の入力
