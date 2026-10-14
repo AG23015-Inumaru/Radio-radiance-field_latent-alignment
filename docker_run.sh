@@ -15,6 +15,7 @@ docker run -it --rm \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v /home/${USER}/.Xauthority:/root/.Xauthority \
     -v ${SCRIPT_DIR}:/workspace \
+    -v "$HOME/.gitconfig:/home/sinumaru/.gitconfig:ro" \
     --gpus "device=${GPU_ID}" \
     --shm-size 16G \
     --entrypoint /bin/bash \
