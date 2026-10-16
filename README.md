@@ -22,7 +22,22 @@ Pythonコードは `scripts/` に置きます。生成されるファイルは `
 元データと外部モデルは別リポジトリ側のパスを参照します。
 datasetファイルに，入力データは保存
 
+<<<<<<< Updated upstream
 成功したNeWRFのチェックポイント・学習時YAML・ソースを指定し、1視点分のRF特徴を抽出します。
+=======
+## 最初の確認
+
+以下のコマンドは、このリポジトリのルート（コンテナ内では `/workspace`）から実行します。
+
+```bash
+python -m pip install -r scripts/newrf_latent_alignment/requirements.txt
+python -m scripts.newrf_latent_alignment.rf.extract --help
+```
+
+PyTorchは使用しているCUDA環境に合うものを利用してください。
+
+次は、成功したNeWRFのチェックポイント・学習時YAML・ソースを指定し、1視点分のRF特徴を抽出します。
+>>>>>>> Stashed changes
 [詳しい実行手順](docs/newrf_latent_alignment.md)に沿って進めてください。
 
 ## 可視画像の入力

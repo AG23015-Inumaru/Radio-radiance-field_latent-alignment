@@ -25,8 +25,8 @@ class MapVAEConfig:
             raise ValueError("This experiment preserves the existing grayscale preprocessing")
         if type(self.residual_blocks) is not int or self.residual_blocks < 0:
             raise ValueError("residual_blocks must be a nonnegative integer")
-        if self.image_height % self.factor or self.image_width % self.factor:
-            raise ValueError(f"Image height and width must be divisible by {self.factor}")
+        if self.image_height < self.factor or self.image_width < self.factor:
+            raise ValueError(f"Image height and width must be at least {self.factor}")
 
     @property
     def factor(self):
@@ -59,6 +59,11 @@ class GrayMapVAE(nn.Module):
         super().__init__()
         self.config = config or MapVAEConfig()
         cfg = self.config
+        spatial_sizes = [(cfg.image_height, cfg.image_width)]
+        for _ in cfg.channels:
+            height, width = spatial_sizes[-1]
+            spatial_sizes.append((height // 2, width // 2))
+        self.decoder_target_sizes = tuple(reversed(spatial_sizes[:-1]))
         layers, previous = [], cfg.in_channels
         for channels in cfg.channels:
             layers.extend([nn.Conv2d(previous, channels, 4, stride=2, padding=1),
@@ -98,8 +103,8 @@ class GrayMapVAE(nn.Module):
         if latent.ndim != 4 or tuple(latent.shape[1:]) != self.config.latent_shape:
             raise ValueError(f"Expected spatial latent [B, {self.config.latent_shape}]")
         features = self.bottleneck(self.from_latent(latent))
-        for stage in self.decoder_stages:
-            features = stage(F.interpolate(features, scale_factor=2, mode="nearest"))
+        for stage, size in zip(self.decoder_stages, self.decoder_target_sizes):
+            features = stage(F.interpolate(features, size=size, mode="nearest"))
         return torch.sigmoid(features)
 
     def forward(self, image, sample=True, generator=None):

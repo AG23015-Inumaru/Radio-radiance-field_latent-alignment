@@ -23,7 +23,7 @@ torch.set_num_threads(1)
 
 class SpatialModelTests(unittest.TestCase):
     def test_spatial_round_trip_and_gradient_path(self):
-        for channels in ((8, 16), (8, 16, 16), (8, 16, 16, 16)):
+        for channels in ((8, 16), (8, 16, 16), (8, 16, 16, 16), (8, 16, 16, 16, 16)):
             cfg = MapVAEConfig(image_height=32, image_width=48, channels=channels, latent_channels=3)
             model = GrayMapVAE(cfg)
             image = torch.rand(2, 1, 32, 48)
@@ -61,9 +61,9 @@ class SpatialModelTests(unittest.TestCase):
         sample_b, _, _ = model(image, sample=True)
         self.assertFalse(torch.equal(sample_a, sample_b))
 
-    def test_unsupported_vector_config_and_uneven_size_are_rejected(self):
+    def test_unsupported_vector_config_and_too_small_size_are_rejected(self):
         with self.assertRaises(ValueError):
-            MapVAEConfig(image_height=31, image_width=48)
+            MapVAEConfig(image_height=7, image_width=48)
         with self.assertRaises(TypeError):
             MapVAEConfig(latent_dim=128)
 

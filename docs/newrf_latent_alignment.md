@@ -87,7 +87,7 @@ Blender/NeRF形式の `transforms_train.json` がある場合は変換できま�
 `rf_from_world.json` の内容は4×4行列のJSON配列です。
 
 ```bash
-python -m scripts.newrf_latent_alignment.prepare_views \
+python -m scripts.newrf_latent_alignment.views.prepare_views \
   --transforms /path/to/transforms_train.json \
   --rf-from-world /path/to/rf_from_world.json \
   --image-map /path/to/gs_image_map.json \
@@ -119,7 +119,7 @@ NEWRF_ROOT=/path/to/NeWRF-ubuntu35
 NEWRF_CONFIG=/path/to/successful_run/config.yaml
 NEWRF_CKPT=/path/to/successful_run/ckpt.pt
 
-python -m scripts.newrf_latent_alignment.extract \
+python -m scripts.newrf_latent_alignment.rf.extract \
   --newrf-root "$NEWRF_ROOT" \
   --config "$NEWRF_CONFIG" \
   --checkpoint "$NEWRF_CKPT" \
@@ -150,13 +150,13 @@ fineはcoarseの密度重みで階層サンプリングし、その位置でfine
 各キャッシュは既存ファイルへの上書きを拒否します。
 
 ```bash
-python -m scripts.newrf_latent_alignment.extract \
+python -m scripts.newrf_latent_alignment.rf.extract \
   --newrf-root "$NEWRF_ROOT" --config "$NEWRF_CONFIG" --checkpoint "$NEWRF_CKPT" \
   --views "$ALIGN_DATA/views.json" --model coarse --width 48 --height 32 \
   --carrier-ghz 2.4 --output "$ALIGN_DATA/rf/rf_features.pt"
 
 VAE_CKPT=/path/to/gray_vae/best.pt
-python -m scripts.newrf_latent_alignment.encode \
+python -m scripts.newrf_latent_alignment.vae.encode \
   --views "$ALIGN_DATA/views.json" --vae-checkpoint "$VAE_CKPT" \
   --output "$ALIGN_DATA/vae/visual_mu.pt"
 ```
@@ -170,11 +170,11 @@ VAEチェックポイントに完全な `config` がない場合は、学習時�
 ## 4. CNNを学習し、復元を見る
 
 ```bash
-python -m scripts.newrf_latent_alignment.train \
+python -m scripts.newrf_latent_alignment.alignment.train \
   --features "$ALIGN_DATA/rf/rf_features.pt" --targets "$ALIGN_DATA/vae/visual_mu.pt" \
   --output-dir "$ALIGN_DATA/runs/run001" --epochs 200 --batch-size 16 --seed 0
 
-python -m scripts.newrf_latent_alignment.decode \
+python -m scripts.newrf_latent_alignment.vae.decode \
   --predictions "$ALIGN_DATA/runs/run001/predictions.pt" --vae-checkpoint "$VAE_CKPT" \
   --split val --output-dir "$ALIGN_DATA/runs/run001/val_images"
 ```
@@ -198,10 +198,10 @@ PSNRは表示用の数枚だけでなく、指定splitの全視点で計算し�
 この経路では可視画像を読みません。manifestの `image` は対応情報として残して構いません。
 
 ```bash
-python -m scripts.newrf_latent_alignment.predict \
+python -m scripts.newrf_latent_alignment.alignment.predict \
   --checkpoint "$ALIGN_DATA/runs/run001/best.pt" --features "$ALIGN_DATA/rf/new_rf_features.pt" \
   --output "$ALIGN_DATA/inference/predicted_mu.pt"
-python -m scripts.newrf_latent_alignment.decode \
+python -m scripts.newrf_latent_alignment.vae.decode \
   --predictions "$ALIGN_DATA/inference/predicted_mu.pt" --vae-checkpoint "$VAE_CKPT" \
   --output-dir "$ALIGN_DATA/inference/images"
 ```
